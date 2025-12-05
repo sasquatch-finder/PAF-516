@@ -1,0 +1,146 @@
+---
+title: "Doorling Cartogram"
+author: "Owen Hurley"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library( dplyr )
+library( tidycensus )
+library( cartogram )
+library( sp )
+library( sf )
+library( mclust )
+library( tmap )
+
+
+balt.pop <-
+get_acs( geography = "tract", variables = "B01003_001",
+         state = "MD", county = "Baltimore city", geometry = FALSE ) %>% 
+         select( GEOID, estimate ) %>%
+         rename( POP=estimate )
+
+balt.mhhi <- 
+  get_acs( geography = "tract", variables = "B19013_001",
+           state = "MD", county = "Baltimore city", geometry = FALSE ) %>% 
+  select( GEOID, estimate ) %>% 
+  rename( MHHI=estimate )
+
+
+# get a census tract shapefile
+# and add census data: 
+
+library( tigris )
+library( pander )
+
+balt <- tracts( state="MD", county="Baltimore city", cb=TRUE, year=2015 )
+```
+
+```{r}
+balt <- merge( balt, balt.pop, by.x="GEOID", by.y="GEOID" )
+balt <- merge( balt, balt.mhhi, by.x="GEOID", by.y="GEOID" )
+URL1 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2000.rds"
+d1 <- readRDS( gzcon( url( URL1 ) ) )
+
+URL2 <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-2010.rds"
+d2 <- readRDS( gzcon( url( URL2 ) ) )
+
+URLmd <- "https://github.com/DS4PS/cpp-529-fall-2020/raw/main/LABS/data/rodeo/LTDB-META-DATA.rds"
+md <- readRDS( gzcon( url( URLmd ) ) )
+
+d1 <- select( d1, - year )
+d2 <- select( d2, - year )
+
+d <- merge( d1, d2, by="tractid" )
+d <- merge( d, md, by="tractid" )
+
+x <- d$tractid 
+head( x )
+# [1] "fips-01-001-020100" "fips-01-001-020200" "fips-01-001-020300"
+# [4] "fips-01-001-020400" "fips-01-001-020500" "fips-01-001-020600"
+
+x <- gsub( "fips", "", x )
+x <- gsub( "-", "", x )
+head( x )
+# [1] "01001020100" "01001020200" "01001020300" "01001020400" "01001020500"
+# [6] "01001020600"
+
+x <- as.numeric( x )
+
+# remember to add the variable back to the dataset
+d$tractid2 <- x 
+```
+```{r}
+# can merge an sf object and data.frame
+balt <- merge( balt, d, by.x="GEOID", by.y="tractid2" )
+balt <- balt[ ! st_is_empty( balt ) , ]
+```
+
+```{r}
+balt.sp <- as(balt, "Spatial")
+balt.sp <- spTransform( balt.sp,CRS("+init=epsg:3395"))
+balt.sp <- balt.sp[ balt.sp$POP != 0 & (! is.na( balt.sp$POP )) , ]
+```
+
+```{r}
+
+# convert census tract polygons to dorling cartogram
+# no idea why k=0.03 works, but it does - default is k=5
+balt.sp$pop.w <- balt.sp$POP / 9000   # standardizes it to max of 1.5
+balt_dorling <- cartogram_dorling( x=balt.sp, weight="pop.w", k=0.07 )
+balt_dorling <- spTransform(balt_dorling, CRS("+init=epsg:3395"))
+plot( balt_dorling )
+```
+
+
+```{r}
+balt_dorling_sf <- st_as_sf(balt_dorling)
+tm_shape( balt_dorling_sf ) + 
+  tm_polygons( size="POP", col="MHHI", n=7, style="quantile", palette="Spectral" ) 
+```
+```{r}
+keep.these <- c("pnhwht12", "pnhblk12", "phisp12", "pntv12", "pfb12", "polang12", 
+"phs12", "pcol12", "punemp12", "pflabf12", "pprof12", "pmanuf12", 
+"pvet12", "psemp12", "hinc12", "incpc12", "ppov12", "pown12", 
+"pvac12", "pmulti12", "mrent12", "mhmval12", "p30old12", "p10yrs12", 
+"p18und12", "p60up12", "p75up12", "pmar12", "pwds12", "pfhh12")
+d1 <- balt_dorling@data
+d2 <- select( d1, keep.these )
+d3 <- apply( d2, 2, scale )
+head( d3[,1:6] ) %>% pander()
+
+```
+
+
+```{r}
+set.seed( 1234 )
+fit <- Mclust( d3 )
+balt_dorling$cluster <- as.factor( fit$classification )
+
+```
+```{r}
+summary( fit )
+```
+
+```{r}
+library( geojsonio )
+
+# data frame and polygon ID standardization in case a tract was dropped and IDs don't match
+row.ids <- sapply( slot( balt_dorling, "polygons" ), function(x) slot( x, "ID" ) )
+row.names( balt_dorling ) <- row.ids
+
+# project to standard lat-lon coordinate system 
+balt_dorling <- spTransform( balt_dorling, CRS("+proj=longlat +datum=WGS84") )
+
+# write to file 
+geojson_write( balt_dorling, file="balt_dorling.geojson", geometry="polygon" )
+```
+
+
+
+
